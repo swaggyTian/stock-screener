@@ -7,6 +7,7 @@ import streamlit as st
 import akshare as ak
 import pandas as pd
 from datetime import datetime
+import time
 
 # 页面配置
 st.set_page_config(
@@ -21,28 +22,44 @@ st.markdown("---")
 # 侧边栏 - 筛选条件
 st.sidebar.header("🎯 筛选条件")
 
+# 重试机制
+def fetch_with_retry(func, max_retries=3, delay=2):
+    """带重试的数据获取函数"""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                continue
+            else:
+                raise e
+
 # 缓存数据加载
 @st.cache_data(ttl=3600)  # 缓存1小时
 def load_stock_data():
     """获取A股股票数据"""
     try:
-        # 获取A股实时行情
-        df = ak.stock_zh_a_spot_em()
-        return df
+        # 方法1: 东方财富实时行情
+        df = fetch_with_retry(lambda: ak.stock_zh_a_spot_em())
+        if df is not None and len(df) > 0:
+            return df, "东方财富"
+        
+        # 方法2: 备用数据源
+        df = fetch_with_retry(lambda: ak.stock_zh_a_spot_tx())
+        if df is not None and len(df) > 0:
+            return df, "腾讯财经"
+            
     except Exception as e:
-        st.error(f"获取数据失败: {e}")
-        return None
-
-@st.cache_data(ttl=3600)
-def load_stock_info():
-    """获取股票详细信息（财务指标）"""
-    try:
-        # 获取股票财务数据
-        df = ak.stock_financial_abstract_ths(symbol="全部A股")
-        return df
-    except Exception as e:
-        st.warning(f"获取财务数据失败，将使用简化筛选: {e}")
-        return None
+        try:
+            # 方法3: 新浪财经备用
+            df = fetch_with_retry(lambda: ak.stock_zh_a_spot_sina())
+            if df is not None and len(df) > 0:
+                return df, "新浪财经"
+        except:
+            pass
+    
+    raise Exception(f"所有数据源均不可用: {e}")
 
 # 主筛选条件
 st.sidebar.subheader("📊 基础指标")
@@ -62,15 +79,6 @@ change_max = st.sidebar.number_input("最大涨跌幅（%）", value=10.0, step=
 # 换手率
 turnover_min = st.sidebar.number_input("最小换手率（%）", value=0.0, step=0.5)
 
-# 行业筛选
-st.sidebar.subheader("🏭 行业选择")
-industry_options = [
-    "不限", "新能源", "半导体", "医药生物", "电子", "计算机",
-    "银行", "非银金融", "房地产", "化工", "机械设备",
-    "汽车", "电力设备", "国防军工", "有色金属", "传媒"
-]
-selected_industry = st.sidebar.selectbox("所属行业", industry_options)
-
 # 排序选项
 st.sidebar.subheader("📋 排序方式")
 sort_by = st.sidebar.selectbox(
@@ -88,12 +96,23 @@ if st.sidebar.button("🔄 加载最新数据", type="primary"):
 st.markdown("### 📋 筛选结果")
 
 # 加载数据
-with st.spinner("正在加载A股数据..."):
-    df = load_stock_data()
+with st.spinner("正在加载A股数据（可能需要10-30秒）..."):
+    try:
+        result = load_stock_data()
+        if result:
+            df, source = result
+        else:
+            df = None
+            source = None
+    except Exception as e:
+        st.error(f"❌ 数据获取失败: {str(e)[:100]}")
+        st.info("💡 建议：点击左侧 '🔄 加载最新数据' 按钮重试，或稍后再试")
+        st.stop()
 
 if df is not None and len(df) > 0:
+    st.success(f"✅ 数据加载成功（数据源: {source}）")
+    
     # 数据预处理
-    # 统一列名（akshare的列名可能变化）
     column_mapping = {
         '代码': 'code',
         '名称': 'name',
@@ -129,7 +148,7 @@ if df is not None and len(df) > 0:
 
     # 市值筛选
     if 'market_cap' in filtered_df.columns:
-        # 市值单位转换（akshare返回的是元，转换为亿）
+        # 市值单位转换（元转亿）
         filtered_df['market_cap_yi'] = filtered_df['market_cap'] / 1e8
         filtered_df = filtered_df[
             (filtered_df['market_cap_yi'] >= market_cap_min) & 
@@ -141,7 +160,7 @@ if df is not None and len(df) > 0:
         filtered_df = filtered_df[
             (filtered_df['pe'] >= pe_min) & 
             (filtered_df['pe'] <= pe_max) &
-            (filtered_df['pe'] > 0)  # 排除负PE
+            (filtered_df['pe'] > 0)
         ]
 
     # 涨跌幅筛选
@@ -154,9 +173,6 @@ if df is not None and len(df) > 0:
     # 换手率筛选
     if 'turnover' in filtered_df.columns:
         filtered_df = filtered_df[filtered_df['turnover'] >= turnover_min]
-
-    # 行业筛选（如果能获取到行业数据）
-    # 注意：akshare的基础数据可能没有行业字段，这里做个提示
 
     # 排序
     if sort_by in filtered_df.columns:
@@ -172,7 +188,6 @@ if df is not None and len(df) > 0:
         display_cols = ['code', 'name', 'price', 'change_pct', 'change', 
                         'volume', 'amount', 'turnover', 'pe', 'pb']
         
-        # 只显示存在的列
         available_cols = [col for col in display_cols if col in filtered_df.columns]
         result_df = filtered_df[available_cols].copy()
 
@@ -202,21 +217,6 @@ if df is not None and len(df) > 0:
             mime="text/csv"
         )
 
-        # Excel下载
-        excel_buffer = pd.ExcelWriter('temp.xlsx', engine='openpyxl')
-        filtered_df.to_excel(excel_buffer, index=False)
-        excel_buffer.close()
-        
-        with open('temp.xlsx', 'rb') as f:
-            excel_data = f.read()
-        
-        st.download_button(
-            label="📥 下载为Excel",
-            data=excel_data,
-            file_name=f"选股结果_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
     else:
         st.warning("没有符合筛选条件的股票，请调整筛选条件")
 
@@ -227,7 +227,7 @@ else:
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray;'>"
-    "数据来源：东方财富 | 更新时间：" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') +
+    "数据来源：东方财富/腾讯财经/新浪财经 | 更新时间：" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') +
     "</div>",
     unsafe_allow_html=True
 )
