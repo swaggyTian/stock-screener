@@ -39,27 +39,33 @@ def fetch_with_retry(func, max_retries=3, delay=2):
 @st.cache_data(ttl=3600)  # 缓存1小时
 def load_stock_data():
     """获取A股股票数据"""
+    last_error = ""
+    
     try:
         # 方法1: 东方财富实时行情
         df = fetch_with_retry(lambda: ak.stock_zh_a_spot_em())
         if df is not None and len(df) > 0:
             return df, "东方财富"
+    except Exception as e:
+        last_error = str(e)
         
-        # 方法2: 备用数据源
+    try:
+        # 方法2: 腾讯财经备用
         df = fetch_with_retry(lambda: ak.stock_zh_a_spot_tx())
         if df is not None and len(df) > 0:
             return df, "腾讯财经"
-            
     except Exception as e:
-        try:
-            # 方法3: 新浪财经备用
-            df = fetch_with_retry(lambda: ak.stock_zh_a_spot_sina())
-            if df is not None and len(df) > 0:
-                return df, "新浪财经"
-        except:
-            pass
+        last_error = str(e)
+        
+    try:
+        # 方法3: 新浪财经备用
+        df = fetch_with_retry(lambda: ak.stock_zh_a_spot_sina())
+        if df is not None and len(df) > 0:
+            return df, "新浪财经"
+    except Exception as e:
+        last_error = str(e)
     
-    raise Exception(f"所有数据源均不可用: {e}")
+    raise Exception(f"所有数据源均不可用: {last_error}")
 
 # 主筛选条件
 st.sidebar.subheader("📊 基础指标")
